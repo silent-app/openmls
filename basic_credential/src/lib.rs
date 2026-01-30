@@ -15,8 +15,15 @@ use openmls_traits::{
 use p256::ecdsa::{signature::Signer as P256Signer, Signature, SigningKey};
 
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tls_codec::{TlsDeserialize, TlsDeserializeBytes, TlsSerialize, TlsSize};
+
+// ML-DSA-65 (post-quantum) support via libcrux
+use libcrux_ml_dsa::{
+    ml_dsa_65, ml_dsa_65::MLDSA65SigningKey, KEY_GENERATION_RANDOMNESS_SIZE,
+    SIGNING_RANDOMNESS_SIZE,
+};
 
 /// A signature key pair for the basic credential.
 ///
@@ -57,6 +64,20 @@ impl Signer for SignatureKeyPair {
                 let signature = k.sign(payload);
                 Ok(signature.to_bytes().into())
             }
+            SignatureScheme::ML_DSA_65 => {
+                const MLDSA65_SK_LEN: usize = 4032;
+                let sk_arr: [u8; MLDSA65_SK_LEN] = self
+                    .private
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| SignerError::SigningError)?;
+                let mut randomness = [0u8; SIGNING_RANDOMNESS_SIZE];
+                OsRng.fill_bytes(&mut randomness);
+                let sk_obj = MLDSA65SigningKey::new(sk_arr);
+                let sig = ml_dsa_65::sign(&sk_obj, payload, b"", randomness)
+                    .map_err(|_| SignerError::SigningError)?;
+                Ok(sig.as_ref().to_vec())
+            }
             _ => Err(SignerError::SigningError),
         }
     }
@@ -89,6 +110,14 @@ impl SignatureKeyPair {
                 let sk = ed25519_dalek::SigningKey::generate(&mut OsRng);
                 let pk = sk.verifying_key().to_bytes().into();
                 (sk.to_bytes().into(), pk)
+            }
+            SignatureScheme::ML_DSA_65 => {
+                let mut keygen_rand = [0u8; KEY_GENERATION_RANDOMNESS_SIZE];
+                OsRng.fill_bytes(&mut keygen_rand);
+                let kp = ml_dsa_65::generate_key_pair(keygen_rand);
+                let sk = kp.signing_key.as_ref().to_vec();
+                let pk = kp.verification_key.as_ref().to_vec();
+                (sk, pk)
             }
             _ => return Err(CryptoError::UnsupportedSignatureScheme),
         };
