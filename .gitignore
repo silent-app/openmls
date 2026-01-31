@@ -17,3 +17,6 @@ fuzz/artifacts
 *.ipr
 
 */repomix*
+
+# AI
+.cursor/

@@ -24,6 +24,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "extensions-draft-08")]
+pub use crate::schedule::application_export_tree::ApplicationExportTreeError;
+
 /// New group error
 #[derive(Error, Debug, PartialEq, Clone)]
 pub enum NewGroupError<StorageError> {
@@ -94,10 +97,39 @@ pub enum MergePendingCommitError<StorageError> {
 
 /// Process message error
 #[derive(Error, Debug, PartialEq, Clone)]
-pub enum ProcessMessageError {
+pub enum PublicProcessMessageError {
     /// See [`LibraryError`] for more details.
     #[error(transparent)]
     LibraryError(#[from] LibraryError),
+    /// The message's wire format is incompatible with the group's wire format policy.
+    #[error("The message's wire format is incompatible with the group's wire format policy.")]
+    IncompatibleWireFormat,
+    /// See [`ValidationError`] for more details.
+    #[error(transparent)]
+    ValidationError(#[from] ValidationError),
+    /// See [`StageCommitError`] for more details.
+    #[error(transparent)]
+    InvalidCommit(#[from] StageCommitError),
+    /// External application messages are not permitted.
+    #[error("External application messages are not permitted.")]
+    UnauthorizedExternalApplicationMessage,
+    /// External commit messages are not permitted.
+    #[error("Commit messages from external senders are not permitted.")]
+    UnauthorizedExternalCommitMessage,
+    /// The proposal is invalid for the Sender of type [External](crate::prelude::Sender::External)
+    #[error("The proposal is invalid for the Sender of type External")]
+    UnsupportedProposalType,
+}
+
+/// Process message error
+#[derive(Error, Debug, PartialEq, Clone)]
+pub enum ProcessMessageError<StorageError> {
+    /// See [`LibraryError`] for more details.
+    #[error(transparent)]
+    LibraryError(#[from] LibraryError),
+    /// Error writing to storage.
+    #[error("Error writing to storage: {0}")]
+    StorageError(StorageError),
     /// The message's wire format is incompatible with the group's wire format policy.
     #[error("The message's wire format is incompatible with the group's wire format policy.")]
     IncompatibleWireFormat,
@@ -119,6 +151,11 @@ pub enum ProcessMessageError {
     /// The proposal is invalid for the Sender of type [External](crate::prelude::Sender::External)
     #[error("The proposal is invalid for the Sender of type External")]
     UnsupportedProposalType,
+
+    /// Use `_with_app_data_update` functions for handling AppDataUpdate proposals
+    #[cfg(feature = "extensions-draft-08")]
+    #[error("Use `_with_app_data_update` functions for handling AppDataUpdate proposals")]
+    FoundAppDataUpdateProposal,
 }
 
 /// Create message error
@@ -153,6 +190,42 @@ pub enum AddMembersError<StorageError> {
     /// Error writing to storage.
     #[error("Error writing to storage")]
     StorageError(StorageError),
+}
+
+/// Add members error
+#[derive(Error, Debug, PartialEq, Clone)]
+pub enum SwapMembersError<StorageError> {
+    /// Unable to map the key packages to the given leaf indices.
+    #[error("Number of added and removed members is not the same")]
+    InvalidInput,
+
+    /// See [`EmptyInputError`] for more details.
+    #[error(transparent)]
+    EmptyInput(#[from] EmptyInputError),
+
+    /// See [`MlsGroupStateError`] for more details.
+    #[error(transparent)]
+    GroupStateError(#[from] MlsGroupStateError),
+
+    /// See [`LibraryError`] for more details.
+    #[error(transparent)]
+    LibraryError(#[from] LibraryError),
+
+    /// The member that should be removed can not be found.
+    #[error("The member that should be removed can not be found.")]
+    UnknownMember,
+
+    /// Error writing to storage
+    #[error("Error writing to storage: {0}")]
+    StorageError(StorageError),
+
+    /// See [`CommitBuilderStageError`] for more details.
+    #[error(transparent)]
+    CommitBuilderStageError(#[from] CommitBuilderStageError<StorageError>),
+
+    /// See [`CreateCommitError`] for more details.
+    #[error(transparent)]
+    CreateCommitError(#[from] CreateCommitError),
 }
 
 /// Propose add members error
@@ -305,6 +378,72 @@ pub enum ExportGroupInfoError {
     /// See [`MlsGroupStateError`] for more details.
     #[error(transparent)]
     GroupStateError(#[from] MlsGroupStateError),
+    /// See [`InvalidExtensionError`] for more details.
+    #[error(transparent)]
+    InvalidExtensionError(#[from] InvalidExtensionError),
+}
+
+/// Export secret error
+#[cfg(feature = "extensions-draft-08")]
+#[derive(Error, Debug, PartialEq, Clone)]
+pub enum SafeExportSecretError<StorageError> {
+    /// See [`MlsGroupStateError`] for more details.
+    #[error(transparent)]
+    GroupState(#[from] MlsGroupStateError),
+    /// See [`ApplicationExportTreeError`] for more details.
+    #[error(transparent)]
+    ApplicationExportTree(#[from] ApplicationExportTreeError),
+    /// Group doesn't support application exports.
+    #[error("Group doesn't support application exports.")]
+    Unsupported,
+    /// Storage error
+    #[error("Error accessing storage: {0}")]
+    Storage(StorageError),
+}
+
+/// Export secret error
+#[cfg(feature = "extensions-draft-08")]
+#[derive(Error, Debug, PartialEq, Clone)]
+pub enum ProcessedMessageSafeExportSecretError {
+    /// See [`StagedSafeExportSecretError`] for more details.
+    #[error(transparent)]
+    SafeExportSecretError(#[from] StagedSafeExportSecretError),
+    /// Processed message is not a commit.
+    #[error("Processed message is not a commit.")]
+    NotACommit,
+}
+
+/// Export secret error
+#[cfg(feature = "extensions-draft-08")]
+#[derive(Error, Debug, PartialEq, Clone)]
+pub enum PendingSafeExportSecretError<StorageError> {
+    /// See [`StagedSafeExportSecretError`] for more details.
+    #[error(transparent)]
+    SafeExportSecretError(#[from] StagedSafeExportSecretError),
+    /// No pending commit.
+    #[error("No pending commit.")]
+    NoPendingCommit,
+    /// Storage error
+    #[error("Error accessing storage: {0}")]
+    Storage(StorageError),
+    /// Only group members can export secrets.
+    #[error("Only group members can export secrets.")]
+    NotGroupMember,
+}
+
+/// Export secret from a pending commit
+#[cfg(feature = "extensions-draft-08")]
+#[derive(Error, Debug, PartialEq, Clone)]
+pub enum StagedSafeExportSecretError {
+    /// Only group members can export secrets.
+    #[error("Only group members can export secrets.")]
+    NotGroupMember,
+    /// See [`ApplicationExportTreeError`] for more details.
+    #[error(transparent)]
+    ApplicationExportTree(#[from] ApplicationExportTreeError),
+    /// Group doesn't support application exports.
+    #[error("Group doesn't support application exports.")]
+    Unsupported,
 }
 
 /// Export secret error
@@ -362,6 +501,9 @@ pub enum ProposalError<StorageError> {
     /// See [`CreateGroupContextExtProposalError`] for more details.
     #[error(transparent)]
     CreateGroupContextExtProposalError(#[from] CreateGroupContextExtProposalError<StorageError>),
+    /// See [`InvalidExtensionError`]
+    #[error(transparent)]
+    InvalidExtension(#[from] InvalidExtensionError),
     /// Error writing proposal to storage.
     #[error("error writing proposal to storage")]
     StorageError(StorageError),

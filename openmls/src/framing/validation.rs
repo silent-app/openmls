@@ -35,6 +35,9 @@ use crate::{
     versions::ProtocolVersion,
 };
 
+#[cfg(feature = "extensions-draft-08")]
+use crate::messages::proposals_in::ProposalOrRefIn;
+
 use super::{
     mls_auth_content::AuthenticatedContent,
     mls_auth_content_in::{AuthenticatedContentIn, VerifiableAuthenticatedContentIn},
@@ -219,7 +222,7 @@ pub(crate) enum SenderContext {
 /// The [`OpenMlsSignaturePublicKey`] is used to verify the signature of the
 /// message.
 #[derive(Debug, Clone)]
-pub(crate) struct UnverifiedMessage {
+pub struct UnverifiedMessage {
     verifiable_content: VerifiableAuthenticatedContentIn,
     credential: Credential,
     sender_pk: OpenMlsSignaturePublicKey,
@@ -261,9 +264,10 @@ impl UnverifiedMessage {
         Ok((content, self.credential))
     }
 
-    /// Get the content type of the message.
-    pub(crate) fn content_type(&self) -> ContentType {
-        self.verifiable_content.content_type()
+    /// Get the proposals of the commit, if it is one. If not, return `None`.
+    #[cfg(feature = "extensions-draft-08")]
+    pub fn committed_proposals(&self) -> Option<&[ProposalOrRefIn]> {
+        self.verifiable_content.committed_proposals()
     }
 }
 
@@ -331,6 +335,24 @@ impl ProcessedMessage {
     /// Returns the credential of the message.
     pub fn credential(&self) -> &Credential {
         &self.credential
+    }
+
+    /// Safely export a value if the content of the processed message is a
+    /// [`StagedCommit`].
+    #[cfg(feature = "extensions-draft-08")]
+    pub fn safe_export_secret<Crypto: OpenMlsCrypto>(
+        &mut self,
+        crypto: &Crypto,
+        component_id: u16,
+    ) -> Result<Vec<u8>, ProcessedMessageSafeExportSecretError> {
+        if let ProcessedMessageContent::StagedCommitMessage(ref mut staged_commit) =
+            &mut self.content
+        {
+            let secret = staged_commit.safe_export_secret(crypto, component_id)?;
+            Ok(secret)
+        } else {
+            Err(ProcessedMessageSafeExportSecretError::NotACommit)
+        }
     }
 }
 

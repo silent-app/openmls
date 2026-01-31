@@ -13,6 +13,7 @@ use crate::{
         CommitBuilderStageError, CreateCommitError, Extensions, GroupId, Member, MlsGroup,
         NewGroupError,
     },
+    prelude::GroupContext,
     prelude::KeyPackage,
     storage::OpenMlsProvider,
 };
@@ -47,7 +48,7 @@ pub struct RebootBuilder<'a> {
 impl<'a> RebootBuilder<'a> {
     /// Returns the group context extensions of the old group, so they can be updated and passed
     /// into the new group.
-    pub fn old_group_context_extensions(&self) -> &Extensions {
+    pub fn old_group_context_extensions(&self) -> &Extensions<GroupContext> {
         self.group.context().extensions()
     }
 
@@ -74,16 +75,14 @@ impl<'a> RebootBuilder<'a> {
     /// argument. If that is not desired, provide the identity function (`|b| b`).
     pub fn finish<Provider: OpenMlsProvider>(
         self,
-        extensions: Extensions,
+        extensions: Extensions<GroupContext>,
         new_members: Vec<KeyPackage>,
         refine_commit_builder: impl FnMut(CommitBuilder<Initial>) -> CommitBuilder<Initial>,
         provider: &Provider,
         signer: &impl Signer,
         credential_with_key: CredentialWithKey,
     ) -> Result<(MlsGroup, CommitMessageBundle), RebootError<Provider::StorageError>> {
-        let group_builder = self
-            .group_builder
-            .with_group_context_extensions(extensions)?;
+        let group_builder = self.group_builder.with_group_context_extensions(extensions);
 
         let mut new_group = group_builder.build(provider, signer, credential_with_key)?;
 
@@ -210,7 +209,7 @@ mod test {
         );
 
         // Now, reboot the group
-        let (mut new_group_alice, message_bundle) = alice_group
+        let (mut new_alice_group, message_bundle) = alice_group
             .reboot(GroupId::from_slice(b"new group id"))
             .finish(
                 Extensions::empty(),
@@ -226,7 +225,7 @@ mod test {
             .unwrap();
 
         let (_commit, welcome, _group_info) = message_bundle.into_messages();
-        new_group_alice
+        new_alice_group
             .merge_pending_commit(alice_provider)
             .unwrap();
 
@@ -234,9 +233,9 @@ mod test {
         let welcome = welcome.unwrap();
         let welcome: MlsMessageIn = welcome.into();
         let welcome = welcome.into_welcome().unwrap();
-        let ratchet_tree = new_group_alice.export_ratchet_tree();
+        let ratchet_tree = new_alice_group.export_ratchet_tree();
 
-        let new_group_bob = StagedWelcome::new_from_welcome(
+        let new_bob_group = StagedWelcome::new_from_welcome(
             bob_provider,
             alice_group.configuration(),
             welcome.clone(),
@@ -256,11 +255,11 @@ mod test {
         .into_group(bob_provider)
         .unwrap();
 
-        let alice_comparison = new_group_alice
+        let alice_comparison = new_alice_group
             .export_secret(alice_provider.crypto(), "comparison", b"", 32)
             .unwrap();
 
-        let bob_comparison = new_group_bob
+        let bob_comparison = new_bob_group
             .export_secret(bob_provider.crypto(), "comparison", b"", 32)
             .unwrap();
 

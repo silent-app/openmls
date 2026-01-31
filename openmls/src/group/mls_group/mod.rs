@@ -17,12 +17,13 @@ use crate::{
     ciphersuite::{hash_ref::ProposalRef, signable::Signable},
     credentials::Credential,
     error::LibraryError,
+    extensions::Extensions,
     framing::{mls_auth_content::AuthenticatedContent, *},
     group::{
-        CreateGroupContextExtProposalError, Extension, ExtensionType, Extensions,
-        ExternalPubExtension, GroupContext, GroupEpoch, GroupId, MlsGroupJoinConfig,
-        MlsGroupStateError, OutgoingWireFormatPolicy, PublicGroup, RatchetTreeExtension,
-        RequiredCapabilitiesExtension, StagedCommit,
+        CreateGroupContextExtProposalError, Extension, ExtensionType, ExternalPubExtension,
+        GroupContext, GroupEpoch, GroupId, MlsGroupJoinConfig, MlsGroupStateError,
+        OutgoingWireFormatPolicy, PublicGroup, RatchetTreeExtension, RequiredCapabilitiesExtension,
+        StagedCommit,
     },
     key_packages::KeyPackageBundle,
     messages::{
@@ -44,6 +45,9 @@ use crate::{
 };
 use openmls_traits::{signatures::Signer, storage::StorageProvider as _, types::Ciphersuite};
 
+#[cfg(feature = "extensions-draft-08")]
+use crate::schedule::{application_export_tree::ApplicationExportTree, ApplicationExportSecret};
+
 // Private
 mod application;
 mod exporting;
@@ -63,6 +67,9 @@ pub(crate) mod processing;
 pub(crate) mod proposal;
 pub(crate) mod proposal_store;
 pub(crate) mod staged_commit;
+
+#[cfg(feature = "extensions-draft-08")]
+pub(crate) mod app_ephemeral;
 
 // Tests
 #[cfg(test)]
@@ -247,6 +254,11 @@ pub struct MlsGroup {
     // A variable that indicates the state of the group. See [`MlsGroupState`]
     // for more information.
     group_state: MlsGroupState,
+    /// The state of the Application Exporter. See the MLS Extensions Draft 08
+    /// for more information. This is `None` if an old OpenMLS group state was
+    /// loaded and has not yet merged a commit.
+    #[cfg(feature = "extensions-draft-08")]
+    application_export_tree: Option<ApplicationExportTree>,
 }
 
 impl MlsGroup {
@@ -399,7 +411,7 @@ impl MlsGroup {
     }
 
     /// Get a reference to the group context [`Extensions`] of this [`MlsGroup`].
-    pub fn extensions(&self) -> &Extensions {
+    pub fn extensions(&self) -> &Extensions<GroupContext> {
         self.public_group().group_context().extensions()
     }
 
@@ -426,6 +438,8 @@ impl MlsGroup {
         let mls_group_config = storage.mls_group_join_config(group_id)?;
         let own_leaf_nodes = storage.own_leaf_nodes(group_id)?;
         let group_state = storage.group_state(group_id)?;
+        #[cfg(feature = "extensions-draft-08")]
+        let application_export_tree = storage.application_export_tree(group_id)?;
 
         let build = || -> Option<Self> {
             Some(Self {
@@ -438,6 +452,8 @@ impl MlsGroup {
                 own_leaf_nodes,
                 aad: vec![],
                 group_state: group_state?,
+                #[cfg(feature = "extensions-draft-08")]
+                application_export_tree,
             })
         };
 
@@ -460,6 +476,9 @@ impl MlsGroup {
         storage.delete_own_leaf_nodes(self.group_id())?;
         storage.delete_group_state(self.group_id())?;
         storage.clear_proposal_queue::<GroupId, ProposalRef>(self.group_id())?;
+
+        #[cfg(feature = "extensions-draft-08")]
+        storage.delete_application_export_tree::<_, ApplicationExportTree>(self.group_id())?;
 
         self.proposal_store_mut().empty();
         storage.delete_encryption_epoch_key_pairs(
@@ -555,7 +574,7 @@ impl MlsGroup {
     pub(crate) fn create_group_context_ext_proposal<Provider: OpenMlsProvider>(
         &self,
         framing_parameters: FramingParameters,
-        extensions: Extensions,
+        extensions: Extensions<GroupContext>,
         signer: &impl Signer,
     ) -> Result<AuthenticatedContent, CreateGroupContextExtProposalError<Provider::StorageError>>
     {
@@ -621,7 +640,7 @@ impl MlsGroup {
     }
 
     /// Returns a reference to the proposal store.
-    pub(crate) fn proposal_store(&self) -> &ProposalStore {
+    pub fn proposal_store(&self) -> &ProposalStore {
         self.public_group.proposal_store()
     }
 
@@ -714,6 +733,10 @@ impl MlsGroup {
         storage.write_resumption_psk_store(self.group_id(), &self.resumption_psk_store)?;
         storage.write_mls_join_config(self.group_id(), &self.mls_group_config)?;
         storage.write_group_state(self.group_id(), &self.group_state)?;
+        #[cfg(feature = "extensions-draft-08")]
+        if let Some(application_export_tree) = &self.application_export_tree {
+            storage.write_application_export_tree(self.group_id(), application_export_tree)?;
+        }
 
         Ok(())
     }
@@ -814,16 +837,83 @@ impl MlsGroup {
         self.public_group.set_group_context(group_context)
     }
 
-    #[cfg(test)]
-    pub(crate) fn ensure_persistence(
-        &self,
-        storage: &impl StorageProvider,
-    ) -> Result<(), LibraryError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn ensure_persistence(&self, storage: &impl StorageProvider) -> Result<(), LibraryError> {
         let loaded = MlsGroup::load(storage, self.group_id())
             .map_err(|_| LibraryError::custom("Failed to load group from storage"))?;
         let other = loaded.ok_or_else(|| LibraryError::custom("Group not found in storage"))?;
 
         if self != &other {
+            let mut diagnostics = Vec::new();
+
+            if self.mls_group_config != other.mls_group_config {
+                diagnostics.push(format!(
+                    "mls_group_config:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.mls_group_config, other.mls_group_config
+                ));
+            }
+            if self.public_group != other.public_group {
+                diagnostics.push(format!(
+                    "public_group:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.public_group, other.public_group
+                ));
+            }
+            if self.group_epoch_secrets != other.group_epoch_secrets {
+                diagnostics.push(format!(
+                    "group_epoch_secrets:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.group_epoch_secrets, other.group_epoch_secrets
+                ));
+            }
+            if self.own_leaf_index != other.own_leaf_index {
+                diagnostics.push(format!(
+                    "own_leaf_index:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.own_leaf_index, other.own_leaf_index
+                ));
+            }
+            if self.message_secrets_store != other.message_secrets_store {
+                diagnostics.push(format!(
+                    "message_secrets_store:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.message_secrets_store, other.message_secrets_store
+                ));
+            }
+            if self.resumption_psk_store != other.resumption_psk_store {
+                diagnostics.push(format!(
+                    "resumption_psk_store:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.resumption_psk_store, other.resumption_psk_store
+                ));
+            }
+            if self.own_leaf_nodes != other.own_leaf_nodes {
+                diagnostics.push(format!(
+                    "own_leaf_nodes:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.own_leaf_nodes, other.own_leaf_nodes
+                ));
+            }
+            if self.aad != other.aad {
+                diagnostics.push(format!(
+                    "aad:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.aad, other.aad
+                ));
+            }
+            if self.group_state != other.group_state {
+                diagnostics.push(format!(
+                    "group_state:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.group_state, other.group_state
+                ));
+            }
+            #[cfg(feature = "extensions-draft-08")]
+            if self.application_export_tree != other.application_export_tree {
+                diagnostics.push(format!(
+                    "application_export_tree:\n  Current: {:?}\n  Loaded:  {:?}",
+                    self.application_export_tree, other.application_export_tree
+                ));
+            }
+
+            log::error!(
+                "Loaded group does not match current group! Differing fields ({}):\n\n{}",
+                diagnostics.len(),
+                diagnostics.join("\n\n")
+            );
+
             return Err(LibraryError::custom(
                 "Loaded group does not match current group",
             ));
@@ -850,6 +940,11 @@ pub struct StagedWelcome {
     /// able to decrypt application messages from previous epochs, the size of
     /// the store must be increased through [`max_past_epochs()`].
     message_secrets_store: MessageSecretsStore,
+
+    /// A secret that is not stored as part of the [`MlsGroup`] after the group is created.
+    /// It can be used by the application to derive forward secure secrets.
+    #[cfg(feature = "extensions-draft-08")]
+    application_export_secret: ApplicationExportSecret,
 
     /// Resumption psk store. This is where the resumption psks are kept in a rollover list.
     resumption_psk_store: ResumptionPskStore,

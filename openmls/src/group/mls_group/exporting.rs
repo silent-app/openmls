@@ -1,8 +1,11 @@
 use errors::{ExportGroupInfoError, ExportSecretError};
 use openmls_traits::{crypto::OpenMlsCrypto, signatures::Signer};
 
+#[cfg(feature = "extensions-draft-08")]
+use crate::group::{PendingSafeExportSecretError, SafeExportSecretError};
 use crate::{
     ciphersuite::HpkePublicKey,
+    extensions::errors::InvalidExtensionError,
     schedule::{EpochAuthenticator, ResumptionPskSecret},
 };
 
@@ -41,6 +44,57 @@ impl MlsGroup {
         }
     }
 
+    /// Export a secret from the forward secure exporter for the component with
+    /// the given component ID.
+    #[cfg(feature = "extensions-draft-08")]
+    pub fn safe_export_secret<Crypto: OpenMlsCrypto, Storage: StorageProvider>(
+        &mut self,
+        crypto: &Crypto,
+        storage: &Storage,
+        component_id: u16,
+    ) -> Result<Vec<u8>, SafeExportSecretError<Storage::Error>> {
+        if !self.is_active() {
+            return Err(SafeExportSecretError::GroupState(
+                MlsGroupStateError::UseAfterEviction,
+            ));
+        }
+        let group_id = self.public_group.group_id();
+        let ciphersuite = self.ciphersuite();
+        let Some(application_export_tree) = self.application_export_tree.as_mut() else {
+            return Err(SafeExportSecretError::Unsupported);
+        };
+        let component_secret =
+            application_export_tree.safe_export_secret(crypto, ciphersuite, component_id)?;
+        storage
+            .write_application_export_tree(group_id, application_export_tree)
+            .map_err(SafeExportSecretError::Storage)?;
+
+        Ok(component_secret.as_slice().to_vec())
+    }
+
+    /// Export a secret from the forward secure exporter of the pending commit
+    /// state for the component with the given component ID.
+    #[cfg(feature = "extensions-draft-08")]
+    pub fn safe_export_secret_from_pending<Provider: StorageProvider>(
+        &mut self,
+        crypto: &impl OpenMlsCrypto,
+        storage: &Provider,
+        component_id: u16,
+    ) -> Result<Vec<u8>, PendingSafeExportSecretError<Provider::Error>> {
+        let group_id = self.group_id().clone();
+        let MlsGroupState::PendingCommit(ref mut group_state) = self.group_state else {
+            return Err(PendingSafeExportSecretError::NoPendingCommit);
+        };
+        let PendingCommitState::Member(ref mut staged_commit) = **group_state else {
+            return Err(PendingSafeExportSecretError::NotGroupMember);
+        };
+        let secret = staged_commit.safe_export_secret(crypto, component_id)?;
+        storage
+            .write_group_state(&group_id, &self.group_state)
+            .map_err(PendingSafeExportSecretError::Storage)?;
+        Ok(secret.as_slice().to_vec())
+    }
+
     /// Returns the epoch authenticator of the current epoch.
     pub fn epoch_authenticator(&self) -> &EpochAuthenticator {
         self.group_epoch_secrets().epoch_authenticator()
@@ -64,6 +118,20 @@ impl MlsGroup {
         signer: &impl Signer,
         with_ratchet_tree: bool,
     ) -> Result<MlsMessageOut, ExportGroupInfoError> {
+        self.export_group_info_with_additional_extensions(crypto, signer, with_ratchet_tree, None)
+    }
+
+    /// Export a group info object for this group, with additional extensions.
+    ///
+    ///  Returns an error if a  [`RatchetTreeExtension`] or [`ExternalPubExtension`] is added
+    ///  directly here.
+    pub fn export_group_info_with_additional_extensions<CryptoProvider: OpenMlsCrypto>(
+        &self,
+        crypto: &CryptoProvider,
+        signer: &impl Signer,
+        with_ratchet_tree: bool,
+        additional_extensions: impl IntoIterator<Item = Extension>,
+    ) -> Result<MlsMessageOut, ExportGroupInfoError> {
         let extensions = {
             let ratchet_tree_extension = || {
                 Extension::RatchetTree(RatchetTreeExtension::new(
@@ -83,16 +151,28 @@ impl MlsGroup {
                 )))
             };
 
-            if with_ratchet_tree {
-                Extensions::from_vec(vec![ratchet_tree_extension(), external_pub_extension()?])
-                    .map_err(|_| {
-                        LibraryError::custom(
-                            "There should not have been duplicate extensions here.",
-                        )
-                    })?
+            let mut extensions = if with_ratchet_tree {
+                vec![ratchet_tree_extension(), external_pub_extension()?]
             } else {
-                Extensions::single(external_pub_extension()?)
-            }
+                vec![external_pub_extension()?]
+            };
+
+            extensions.extend(
+                additional_extensions
+                    .into_iter()
+                    .map(|extension| {
+                        if extension.as_ratchet_tree_extension().is_ok()
+                            || extension.as_external_pub_extension().is_ok()
+                        {
+                            Err(InvalidExtensionError::CannotAddDirectlyToGroupInfo)
+                        } else {
+                            Ok(extension)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+
+            Extensions::from_vec(extensions)?
         };
 
         // Create to-be-signed group info.
@@ -108,7 +188,7 @@ impl MlsGroup {
                 )
                 .map_err(LibraryError::unexpected_crypto_error)?,
             self.own_leaf_index(),
-        );
+        )?;
 
         // Sign to-be-signed group info.
         let group_info = group_info_tbs

@@ -5,10 +5,10 @@
 //!
 //! ## Internal Documentation
 //!
-//! The key schedule is described in Section 9 of the MLS specification. It
+//! The key schedule is described in Section 8 of the MLS specification. It
 //! evolves in epochs, with new key material injected in each epoch.
 //!
-//! The key schedule flow (from Section 9 of the MLS specification) is as follows:
+//! The key schedule flow (from Section 8 of the MLS specification) is as follows:
 //
 // ```text
 //                  init_secret_[n-1]
@@ -132,9 +132,16 @@ use crate::{
 
 // Public
 pub mod errors;
+#[cfg(feature = "extensions-draft-08")]
+mod pprf;
 pub mod psk;
 
+#[cfg(feature = "extensions-draft-08")]
+pub use pprf::PprfError;
+
 // Crate
+#[cfg(feature = "extensions-draft-08")]
+pub(crate) mod application_export_tree;
 pub(crate) mod message_secrets;
 
 // Private
@@ -410,6 +417,12 @@ pub(crate) struct KeySchedule {
     state: State,
 }
 
+pub(crate) struct EpochSecretsResult {
+    pub(crate) epoch_secrets: EpochSecrets,
+    #[cfg(feature = "extensions-draft-08")]
+    pub(crate) application_exporter: ApplicationExportSecret,
+}
+
 impl KeySchedule {
     /// Initialize the key schedule and return it.
     pub(crate) fn init(
@@ -503,7 +516,7 @@ impl KeySchedule {
         &mut self,
         crypto: &impl OpenMlsCrypto,
         ciphersuite: Ciphersuite,
-    ) -> Result<EpochSecrets, KeyScheduleError> {
+    ) -> Result<EpochSecretsResult, KeyScheduleError> {
         if self.state != State::Context || self.epoch_secret.is_none() {
             log::error!("Trying to derive the epoch secrets while not in the right state.");
             return Err(KeyScheduleError::InvalidState(ErrorState::Context));
@@ -516,7 +529,13 @@ impl KeySchedule {
             None => return Err(LibraryError::custom("state machine error").into()),
         };
 
-        Ok(EpochSecrets::new(crypto, ciphersuite, epoch_secret)?)
+        let res = EpochSecretsResult {
+            #[cfg(feature = "extensions-draft-08")]
+            application_exporter: ApplicationExportSecret::new(crypto, ciphersuite, &epoch_secret)?,
+            epoch_secrets: EpochSecrets::new(crypto, ciphersuite, epoch_secret)?,
+        };
+
+        Ok(res)
     }
 }
 
@@ -739,6 +758,32 @@ impl ExporterSecret {
             .kdf_expand_label(crypto, ciphersuite, "exported", context_hash, key_length)?
             .as_slice()
             .to_vec())
+    }
+}
+
+/// A secret that we can derive secrets from, that are used outside of OpenMLS.
+/// In contrast to `[ExporterSecret]`, the `[ApplicationExportSecret]` is not
+/// persisted. It can be deleted after use to achieve forward secrecy.
+#[cfg(feature = "extensions-draft-08")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(PartialEq))]
+pub struct ApplicationExportSecret {
+    secret: Secret,
+}
+
+#[cfg(feature = "extensions-draft-08")]
+impl ApplicationExportSecret {
+    /// Derive an `ExporterSecret` from an `EpochSecret`.
+    fn new(
+        crypto: &impl OpenMlsCrypto,
+        ciphersuite: Ciphersuite,
+        epoch_secret: &EpochSecret,
+    ) -> Result<Self, CryptoError> {
+        let secret =
+            epoch_secret
+                .secret
+                .derive_secret(crypto, ciphersuite, "application_export")?;
+        Ok(ApplicationExportSecret { secret })
     }
 }
 
