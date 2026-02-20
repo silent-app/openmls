@@ -23,7 +23,7 @@ use crate::{
 };
 
 #[cfg(doc)]
-use crate::treesync::LeafNodeParameters;
+use crate::{group::GroupId, treesync::LeafNodeParameters};
 
 /// Welcome error
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -73,8 +73,8 @@ pub enum WelcomeError<StorageError> {
     /// Could not decrypt the Welcome message.
     #[error("Could not decrypt the Welcome message.")]
     UnableToDecrypt,
-    /// Unsupported extensions found in the KeyPackage of another member.
-    #[error("Unsupported extensions found in the KeyPackage of another member.")]
+    /// Unsupported extensions found in the GroupContext or KeyPackage of another member.
+    #[error("Unsupported extensions found in the GroupContext or KeyPackage of another member.")]
     UnsupportedExtensions,
     /// See [`PskError`] for more details.
     #[error(transparent)]
@@ -98,6 +98,9 @@ pub enum WelcomeError<StorageError> {
     /// This error indicates that an error occurred while reading or writing from/to storage.
     #[error("An error occurred when querying storage")]
     StorageError(StorageError),
+    /// A group with this [`GroupId`] already exists.
+    #[error("A group with this [`GroupId`] already exists.")]
+    GroupAlreadyExists,
 }
 
 /// External Commit error
@@ -339,6 +342,9 @@ pub enum CreateCommitError {
     #[cfg(feature = "extensions-draft-08")]
     #[error(transparent)]
     ApplyAppDataUpdateError(#[from] ApplyAppDataUpdateError),
+    /// See [`LeafNodeValidationError`] for more details.
+    #[error(transparent)]
+    LeafNodeValidation(#[from] LeafNodeValidationError),
 }
 
 /// Stage commit error
@@ -539,6 +545,9 @@ pub enum ExternalCommitValidationError {
     /// External commit contains referenced proposal
     #[error("Found a referenced proposal in an External Commit.")]
     ReferencedProposal,
+    /// External committer's leaf node does not support all group context extensions.
+    #[error("External committer's leaf node does not support all group context extensions.")]
+    UnsupportedGroupContextExtensions,
 }
 
 /// Create add proposal error
