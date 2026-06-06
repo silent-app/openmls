@@ -6,10 +6,23 @@ use super::mls_auth_content::AuthenticatedContent;
 
 use crate::{
     binary_tree::array_representation::LeafNodeIndex, error::LibraryError,
-    tree::secret_tree::SecretType,
+    tree::secret_tree::SecretType, tree::sender_ratchet::Generation,
 };
 
 use super::*;
+
+/// The result of encrypting an [`AuthenticatedContent`] into a
+/// [`PrivateMessage`].
+#[derive(Debug)]
+pub(crate) struct EncryptionOutput {
+    /// The generation of the encryption secret used. With the
+    /// `virtual-clients-draft` feature, callers use the generation to confirm
+    /// the message and delete the corresponding encryption secret. Without the
+    /// feature, the generation is unused.
+    pub(crate) generation: Generation,
+    /// The resulting encrypted message.
+    pub(crate) private_message: PrivateMessage,
+}
 
 /// `PrivateMessage` is the framing struct for an encrypted `PublicMessage`.
 /// This message format is meant to be sent to and received from the Delivery
@@ -45,6 +58,21 @@ pub(crate) struct MlsMessageHeader {
 }
 
 impl PrivateMessage {
+    /// Returns the [`GroupId`] of the group this message was sent in
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+
+    /// Returns the [`GroupEpoch`] of the group this message was sent in
+    pub fn epoch(&self) -> GroupEpoch {
+        self.epoch
+    }
+
+    /// Returns the [`ContentType`] of the payload of this message
+    pub fn content_type(&self) -> ContentType {
+        self.content_type
+    }
+
     #[cfg(test)]
     pub(crate) fn new(
         group_id: GroupId,
@@ -75,7 +103,7 @@ impl PrivateMessage {
         ciphersuite: Ciphersuite,
         message_secrets: &mut MessageSecrets,
         padding_size: usize,
-    ) -> Result<PrivateMessage, MessageEncryptionError<T>> {
+    ) -> Result<EncryptionOutput, MessageEncryptionError<T>> {
         log::debug!("PrivateMessage::try_from_authenticated_content");
         log::trace!("  ciphersuite: {ciphersuite}");
         // Check the message has the correct wire format
@@ -101,7 +129,7 @@ impl PrivateMessage {
         ciphersuite: Ciphersuite,
         message_secrets: &mut MessageSecrets,
         padding_size: usize,
-    ) -> Result<PrivateMessage, MessageEncryptionError<T>> {
+    ) -> Result<EncryptionOutput, MessageEncryptionError<T>> {
         Self::encrypt_content(
             crypto,
             rand,
@@ -122,7 +150,7 @@ impl PrivateMessage {
         header: MlsMessageHeader,
         message_secrets: &mut MessageSecrets,
         padding_size: usize,
-    ) -> Result<PrivateMessage, MessageEncryptionError<T>> {
+    ) -> Result<EncryptionOutput, MessageEncryptionError<T>> {
         Self::encrypt_content(
             crypto,
             rand,
@@ -144,7 +172,7 @@ impl PrivateMessage {
         ciphersuite: Ciphersuite,
         message_secrets: &mut MessageSecrets,
         padding_size: usize,
-    ) -> Result<PrivateMessage, MessageEncryptionError<T>> {
+    ) -> Result<EncryptionOutput, MessageEncryptionError<T>> {
         // https://validation.openmls.tech/#valn1305
         let sender_index = if let Some(index) = public_message.sender().as_member() {
             index
@@ -244,19 +272,18 @@ impl PrivateMessage {
                 &sender_data_nonce,
             )
             .map_err(LibraryError::unexpected_crypto_error)?;
-        Ok(PrivateMessage {
+        let private_message = PrivateMessage {
             group_id: header.group_id.clone(),
             epoch: header.epoch,
             content_type: public_message.content().content_type(),
             authenticated_data: public_message.authenticated_data().into(),
             encrypted_sender_data: encrypted_sender_data.into(),
             ciphertext: ciphertext.into(),
+        };
+        Ok(EncryptionOutput {
+            generation,
+            private_message,
         })
-    }
-
-    /// Returns the epoch of the message.
-    pub fn epoch(&self) -> GroupEpoch {
-        self.epoch
     }
 
     /// Returns `true` if this is a handshake message and `false` otherwise.

@@ -14,8 +14,7 @@ use openmls_traits::{
 
 use p256::ecdsa::{signature::Signer as P256Signer, Signature, SigningKey};
 
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tls_codec::{SecretVLBytes, TlsDeserialize, TlsDeserializeBytes, TlsSerialize, TlsSize};
 use zeroize::Zeroize;
@@ -143,9 +142,11 @@ impl SignatureKeyPair {
                 let mut keygen_rand = [0u8; KEY_GENERATION_RANDOMNESS_SIZE];
                 OsRng.fill_bytes(&mut keygen_rand);
                 let kp = ml_dsa_65::generate_key_pair(keygen_rand);
-                let sk = kp.signing_key.as_ref().to_vec();
+                let mut sk = kp.signing_key.as_ref().to_vec();
+                let private: SecretVLBytes = sk.as_slice().into();
+                sk.zeroize();
                 let pk = kp.verification_key.as_ref().to_vec();
-                (sk, pk)
+                (private, pk)
             }
             _ => return Err(CryptoError::UnsupportedSignatureScheme),
         };
